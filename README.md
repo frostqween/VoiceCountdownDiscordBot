@@ -4,7 +4,8 @@ A Discord bot that plays audio countdown sequences in voice channels using Maste
 
 ## Features
 
-- `/countdown` slash command with number input (5-60)
+- `/muffin` slash command for join/leave/countdown
+- Owner-only debug message commands for status, voice diagnostics, recent errors, and dependency reports
 - Plays audio files sequentially in voice channels
 - Guild-specific commands for faster deployment
 - Modular command structure
@@ -25,7 +26,14 @@ A Discord bot that plays audio countdown sequences in voice channels using Maste
    DISCORD_TOKEN=your_bot_token_here
    CLIENT_ID=your_client_id_here
    GUILD_ID=your_guild_id_here
+   OWNER_ID=your_discord_user_id_here
+   OWNER_IDS=comma_separated_owner_user_ids_optional
+   DEBUG_PREFIX=!debug
+   ENABLE_MESSAGE_DEBUG=false
    ```
+
+   If you want message-based debug commands to work, set `ENABLE_MESSAGE_DEBUG=true` and enable the Message Content intent in the Discord Developer Portal.
+   Only configured owner IDs can use the debug message commands, and non-owners are silently ignored.
 
 3. **Deploy Commands**
 
@@ -53,19 +61,46 @@ Audio files should be placed in the `countdown_audio/` directory and named as `{
 
 ## Commands
 
-### `/countdown`
+### `/muffin cd`
 
 Starts an audio countdown in your current voice channel.
 
 **Parameters:**
 
-- `number` (required): The number to count down from (5-60)
+- `duration` (required): One of 10, 20, 30, 40, 50, 60 seconds
 
 **Usage:**
 
 ```
-/countdown number:10
+/muffin cd duration:10
 ```
+
+### `/muffin join`
+
+Joins your current voice channel.
+
+### `/muffin leave`
+
+Leaves the current guild voice connection.
+
+### `!debug status`
+
+Shows runtime health such as uptime, ping, memory usage, and loaded commands.
+
+### `!debug voice`
+
+Shows current voice connection state and the last recorded voice event for the guild.
+
+### `!debug errors`
+
+Shows the most recent in-memory runtime errors captured by the bot.
+
+### `!debug deps`
+
+Shows the `@discordjs/voice` dependency report from inside Discord.
+
+The debug command prefix is configurable with `DEBUG_PREFIX`.
+Message debug commands are only active when `ENABLE_MESSAGE_DEBUG=true`.
 
 ## Project Structure
 

@@ -12,21 +12,53 @@ const {
 } = require('@discordjs/voice');
 const path = require('path');
 const fs = require('fs');
+const { recordError, recordGuildVoiceEvent } = require('../utils/debug-store');
 
 const VOICE_READY_TIMEOUT_MS = 15_000;
+const PLAYER_READY_TIMEOUT_MS = 10_000;
 const CONNECTION_LISTENERS_ATTACHED = Symbol('connectionListenersAttached');
+const guildPlayers = new Map();
+
+function safeDestroyConnection(connection) {
+    if (connection.state.status !== VoiceConnectionStatus.Destroyed) {
+        connection.destroy();
+    }
+}
+
+function createVoiceStageError(stage, message, error) {
+    const wrappedError = new Error(message, { cause: error });
+    wrappedError.stage = stage;
+    wrappedError.code = error?.code;
+    return wrappedError;
+}
+
+function getUserFacingVoiceError(error) {
+    if (error?.stage === 'connection_ready') {
+        return 'I could not finish joining the voice channel in time. Please try the command again in a moment.';
+    }
+
+    if (error?.stage === 'player_playing') {
+        return 'I joined the voice channel, but the countdown audio did not start in time. Please try again.';
+    }
+
+    return 'There was an error starting the countdown. Check the bot logs for the voice/DAVE dependency report.';
+}
 
 async function ensureReadyConnection(voiceChannel) {
     const connection = joinVoiceChannel({
         channelId: voiceChannel.id,
         guildId: voiceChannel.guild.id,
         adapterCreator: voiceChannel.guild.voiceAdapterCreator,
-        selfDeaf: false,
+        selfDeaf: true,
     });
 
     if (!connection[CONNECTION_LISTENERS_ATTACHED]) {
         connection.on('error', (error) => {
             console.error(`Voice connection error in guild ${voiceChannel.guild.id}:`, error);
+            recordError('voice.connection', error, {
+                guildId: voiceChannel.guild.id,
+                channelId: voiceChannel.id,
+            });
         });
 
         connection.on(VoiceConnectionStatus.Disconnected, async () => {
@@ -36,14 +68,24 @@ async function ensureReadyConnection(voiceChannel) {
                     entersState(connection, VoiceConnectionStatus.Connecting, 5_000),
                 ]);
             } catch {
-                connection.destroy();
+                safeDestroyConnection(connection);
             }
         });
 
         connection[CONNECTION_LISTENERS_ATTACHED] = true;
     }
 
-    await entersState(connection, VoiceConnectionStatus.Ready, VOICE_READY_TIMEOUT_MS);
+    try {
+        await entersState(connection, VoiceConnectionStatus.Ready, VOICE_READY_TIMEOUT_MS);
+    } catch (error) {
+        safeDestroyConnection(connection);
+        throw createVoiceStageError(
+            'connection_ready',
+            `Voice connection did not become ready within ${VOICE_READY_TIMEOUT_MS}ms`,
+            error
+        );
+    }
+
     return connection;
 }
 
@@ -53,6 +95,31 @@ function hasVoicePermissions(voiceChannel, clientUser) {
         permissions?.has(PermissionFlagsBits.Connect) &&
         permissions.has(PermissionFlagsBits.Speak)
     );
+}
+
+function getOrCreateGuildPlayer(guildId) {
+    const existingPlayer = guildPlayers.get(guildId);
+    if (existingPlayer) {
+        return existingPlayer;
+    }
+
+    const player = createAudioPlayer({
+        behaviors: {
+            noSubscriber: NoSubscriberBehavior.Pause,
+            maxMissedFrames: Math.round(5000 / 20) // 5 seconds of missed frames
+        }
+    });
+
+    player.on('error', (error) => {
+        console.error(`Audio player error in guild ${guildId}:`, error);
+    });
+
+    player.on(AudioPlayerStatus.Idle, () => {
+        console.log(`Countdown finished in guild ${guildId}`);
+    });
+
+    guildPlayers.set(guildId, player);
+    return player;
 }
 
 module.exports = {
@@ -134,47 +201,58 @@ module.exports = {
 
         try {
             const connection = await ensureReadyConnection(voiceChannel);
-
-            // Create audio player with improved settings
-            const player = createAudioPlayer({
-                behaviors: {
-                    noSubscriber: NoSubscriberBehavior.Pause,
-                    maxMissedFrames: Math.round(5000 / 20) // 5 seconds of missed frames
-                }
-            });
+            const player = getOrCreateGuildPlayer(interaction.guild.id);
             connection.subscribe(player);
+            recordGuildVoiceEvent(interaction.guild.id, {
+                type: 'countdown_starting',
+                channelId: voiceChannel.id,
+                duration: countdownDuration,
+            });
 
             // Create audio resource - no seeking needed since each file is complete
             const resource = createAudioResource(audioPath, {
                 inputType: StreamType.Arbitrary,
-                inlineVolume: true,
                 metadata: { title: `${countdownDuration} second countdown` }
             });
 
-            // Add error handling for the player
-            player.on('error', (error) => {
-                console.error('Audio player error:', error);
-            });
-
             player.play(resource);
-            await entersState(player, AudioPlayerStatus.Playing, 5_000);
+            try {
+                await entersState(player, AudioPlayerStatus.Playing, PLAYER_READY_TIMEOUT_MS);
+            } catch (error) {
+                throw createVoiceStageError(
+                    'player_playing',
+                    `Audio player did not reach Playing within ${PLAYER_READY_TIMEOUT_MS}ms`,
+                    error
+                );
+            }
 
-            // Handle when audio finishes
-            player.once(AudioPlayerStatus.Idle, () => {
-                // Don't automatically disconnect - let user use /leave command
-                console.log('Countdown finished');
+            recordGuildVoiceEvent(interaction.guild.id, {
+                type: 'countdown_started',
+                channelId: voiceChannel.id,
+                duration: countdownDuration,
             });
-
             await interaction.editReply(`Starting ${countdownDuration} second countdown!`);
 
         } catch (error) {
-            console.error('Error in countdown command:', error);
+            console.error(`Error in countdown command [stage=${error?.stage ?? 'unknown'} code=${error?.code ?? 'n/a'}]:`, error);
+            recordError('muffin.countdown', error, {
+                guildId: interaction.guildId,
+                channelId: voiceChannel.id,
+                duration: countdownDuration,
+            });
+            recordGuildVoiceEvent(interaction.guild.id, {
+                type: 'countdown_error',
+                channelId: voiceChannel.id,
+                duration: countdownDuration,
+                stage: error?.stage ?? null,
+                message: error?.message ?? String(error),
+            });
 
             if (interaction.deferred || interaction.replied) {
-                await interaction.editReply('There was an error starting the countdown. Check the bot logs for the voice/DAVE dependency report.');
+                await interaction.editReply(getUserFacingVoiceError(error));
             } else {
                 await interaction.reply({
-                    content: 'There was an error starting the countdown!',
+                    content: getUserFacingVoiceError(error),
                     ephemeral: true
                 });
             }
@@ -202,16 +280,30 @@ module.exports = {
         try {
             await interaction.deferReply();
             await ensureReadyConnection(voiceChannel);
+            recordGuildVoiceEvent(interaction.guild.id, {
+                type: 'joined',
+                channelId: voiceChannel.id,
+            });
             await interaction.editReply(`Joined **${voiceChannel.name}** and completed the voice handshake.`);
 
         } catch (error) {
-            console.error('Error joining voice channel:', error);
+            console.error(`Error joining voice channel [stage=${error?.stage ?? 'unknown'} code=${error?.code ?? 'n/a'}]:`, error);
+            recordError('muffin.join', error, {
+                guildId: interaction.guildId,
+                channelId: voiceChannel.id,
+            });
+            recordGuildVoiceEvent(interaction.guild.id, {
+                type: 'join_error',
+                channelId: voiceChannel.id,
+                stage: error?.stage ?? null,
+                message: error?.message ?? String(error),
+            });
 
             if (interaction.deferred || interaction.replied) {
-                await interaction.editReply('There was an error joining the voice channel. Check the bot logs for the voice/DAVE dependency report.');
+                await interaction.editReply(getUserFacingVoiceError(error));
             } else {
                 await interaction.reply({
-                    content: 'There was an error joining the voice channel!',
+                    content: getUserFacingVoiceError(error),
                     ephemeral: true
                 });
             }
@@ -231,12 +323,21 @@ module.exports = {
             }
 
             // Destroy the connection
-            connection.destroy();
+            safeDestroyConnection(connection);
+            const player = guildPlayers.get(interaction.guild.id);
+            player?.stop(true);
+            recordGuildVoiceEvent(interaction.guild.id, {
+                type: 'left',
+                channelId: connection.joinConfig.channelId ?? null,
+            });
 
             await interaction.reply('👋 Left the voice channel!');
 
         } catch (error) {
             console.error('Error leaving voice channel:', error);
+            recordError('muffin.leave', error, {
+                guildId: interaction.guildId,
+            });
             await interaction.reply({
                 content: 'There was an error leaving the voice channel!',
                 ephemeral: true
