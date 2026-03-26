@@ -72,6 +72,14 @@ function formatBytes(bytes) {
     return `${value.toFixed(index === 0 ? 0 : 1)} ${units[index]}`;
 }
 
+function formatGatewayPing(ping) {
+    if (!Number.isFinite(ping) || ping < 0) {
+        return 'not ready yet';
+    }
+
+    return `${ping}ms`;
+}
+
 function toCodeBlock(text, maxLength = 1800) {
     const safeText = text.length > maxLength ? `${text.slice(0, maxLength - 16)}\n...[truncated]` : text;
     return `\`\`\`txt\n${safeText}\n\`\`\``;
@@ -82,7 +90,7 @@ function buildDebugStatusReport() {
     const lines = [
         `User: ${client.user?.tag ?? 'unknown'}`,
         `Uptime: ${formatDuration(Date.now() - getBotStartTime())}`,
-        `Gateway Ping: ${client.ws.ping}ms`,
+        `Gateway Ping: ${formatGatewayPing(client.ws.ping)}`,
         `Guilds: ${client.guilds.cache.size}`,
         `Commands: ${client.commands?.size ?? 0}`,
         `Node: ${process.version}`,
