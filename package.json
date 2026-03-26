@@ -13,7 +13,7 @@
     "countdown",
     "voice"
   ],
-  "author": "SohamXYZDev",
+  "author": "",
   "license": "MIT",
   "dependencies": {
     "@discordjs/voice": "^0.19.2",
